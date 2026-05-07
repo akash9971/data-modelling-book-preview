@@ -1,0 +1,83 @@
+{
+  "read_paths": {
+    "message_detail_type_raw": {
+      "path": "abfss://raw@datalake.dfs.core.windows.net/reference/message_detail_type",
+      "format": "delta",
+      "load_type": "full"
+    },
+    "events_raw": {
+      "path": "abfss://raw@datalake.dfs.core.windows.net/events/daily",
+      "format": "parquet",
+      "load_type": "incremental",
+      "primary_key": "event_id"
+    },
+    "session_raw": {
+      "path": "iceberg_catalog.raw_db.sessions",
+      "format": "iceberg",
+      "load_type": "incremental",
+      "primary_key": "session_id"
+    },
+    "user_profile_raw": {
+      "path": "iceberg_catalog.raw_db.user_profile",
+      "format": "iceberg",
+      "load_type": "full"
+    },
+    "device_reference_raw": {
+      "path": "abfss://raw@datalake.dfs.core.windows.net/reference/device_master",
+      "format": "parquet",
+      "load_type": "full"
+    }
+  },
+  "models": [
+    {
+      "name": "message_detail_type",
+      "type": "scdtype2",
+      "query": "SELECT message_type, version, description, schema_definition, updated_date FROM message_detail_type_raw",
+      "lineage": [],
+      "primary_keys": ["message_type"],
+      "scd2_columns": ["version", "description", "schema_definition"],
+      "update_timestamp_col": "updated_date",
+      "hash_columns": ["message_type", "version", "description", "schema_definition"]
+    },
+    {
+      "name": "user_profile",
+      "type": "scdtype1",
+      "query": "SELECT user_id, user_name, email, phone, country, region, signup_date, last_login_date FROM user_profile_raw",
+      "lineage": [],
+      "primary_keys": ["user_id"],
+      "hash_columns": ["user_id", "email", "phone", "country", "region", "last_login_date"]
+    },
+    {
+      "name": "device_reference",
+      "type": "flat",
+      "query": "SELECT device_code, device_type, device_category, manufacturer, is_supported FROM device_reference_raw WHERE is_supported = true",
+      "lineage": [],
+      "primary_keys": []
+    },
+    {
+      "name": "event_tracker",
+      "type": "scdtype1",
+      "query": "SELECT e.event_id, e.session_id, e.user_id, e.event_type, e.event_name, e.event_timestamp, e.payload, e.source_system, e.event_version FROM events_raw e INNER JOIN message_detail_type m ON substring_index(e.event_type, '.', 1) = m.msg_type AND substring_index(e.event_type, '.', -1) = m.msg_version AND m.current_flag = 'Y'",
+      "lineage": ["message_detail_type"],
+      "primary_keys": ["event_id"],
+      "hash_columns": ["event_id", "session_id", "user_id", "event_type", "event_name", "event_timestamp"]
+    },
+    {
+      "name": "session_tracker",
+      "type": "scdtype1",
+      "query": "SELECT s.session_id, s.user_id, s.session_start_time, s.session_end_time, s.device_type, s.browser, s.os_version, s.country, s.region, COUNT(e.event_id) as total_events, SUM(CASE WHEN substring_index(e.event_type, '.', 1) = 'Joinedmeeting' THEN 1 ELSE 0 END) as join_count, SUM(CASE WHEN substring_index(e.event_type, '.', 1) = 'LeftMeeting' THEN 1 ELSE 0 END) as left_count, SUM(CASE WHEN substring_index(e.event_type, '.', 1) = 'ScreenShare' THEN 1 ELSE 0 END) as screenshare_count, MIN(e.event_ts) as first_event_time, MAX(e.event_ts) as last_event_time, ROUND((UNIX_TIMESTAMP(MAX(e.event_ts)) - UNIX_TIMESTAMP(MIN(e.event_ts))) / 60, 2) as session_duration_mins FROM session_raw s LEFT JOIN event_tracker e ON s.session_id = e.session_id GROUP BY s.session_id, s.user_id, s.session_start_time, s.session_end_time, s.device_type, s.browser, s.os_version, s.country, s.region",
+      "lineage": ["event_tracker"],
+      "primary_keys": ["session_id"],
+      "hash_columns": ["session_id", "user_id", "total_events", "join_count", "left_count", "screenshare_count", "session_duration_mins"]
+    },
+    {
+      "name": "user_session_summary",
+      "type": "scdtype2",
+      "query": "SELECT u.user_id, u.user_name, u.country, u.region, COUNT(DISTINCT s.session_id) as total_sessions, SUM(s.total_events) as lifetime_events, SUM(s.join_count) as lifetime_joins, AVG(s.session_duration_mins) as avg_session_duration, MAX(s.last_event_ts) as last_activity_date FROM user_profile u LEFT JOIN session_tracker s ON u.user_id = s.user_id GROUP BY u.user_id, u.user_name, u.country, u.region",
+      "lineage": ["user_profile", "session_tracker"],
+      "primary_keys": ["user_id"],
+      "scd2_columns": ["total_sessions", "lifetime_events", "lifetime_joins", "avg_session_duration"],
+      "update_timestamp_col": "last_activity_date"
+    }
+  ]
+}

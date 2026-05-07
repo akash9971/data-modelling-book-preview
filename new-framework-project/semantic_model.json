@@ -1,0 +1,85 @@
+{
+  "snowflake_config": {
+    "url": "https://<account>.snowflakecomputing.com",
+    "database": "ANALYTICS_DB",
+    "schema": "SEMANTIC",
+    "warehouse": "COMPUTE_WH",
+    "role": "DATA_ENGINEER"
+  },
+  "source_models": {
+    "message_detail_type": {
+      "path": "abfss://curated@datalake.dfs.core.windows.net/reference/message_detail_type",
+      "format": "delta"
+    },
+    "event_tracker": {
+      "path": "abfss://curated@datalake.dfs.core.windows.net/tracking/event_tracker",
+      "format": "delta"
+    },
+    "session_tracker": {
+      "path": "iceberg_catalog.curated_db.session_tracker",
+      "format": "iceberg"
+    },
+    "user_profile": {
+      "path": "iceberg_catalog.curated_db.user_profile",
+      "format": "iceberg"
+    },
+    "user_session_summary": {
+      "path": "iceberg_catalog.curated_db.user_session_summary",
+      "format": "iceberg"
+    },
+    "device_reference": {
+      "path": "abfss://curated@datalake.dfs.core.windows.net/reference/device_master",
+      "format": "parquet"
+    }
+  },
+  "semantic_models": [
+    {
+      "table_name": "dim_message_type",
+      "source_model_name": "message_detail_type",
+      "primary_keys": ["msg_type", "msg_version"],
+      "query": "SELECT msg_type, msg_version, msg_description, schema_def, last_updated, effective_start_date, effective_end_date, current_flag FROM message_detail_type WHERE current_flag = 'Y'",
+      "view_required_flag": false,
+      "view_query": null
+    },
+    {
+      "table_name": "dim_user",
+      "source_model_name": "user_profile",
+      "primary_keys": ["user_id"],
+      "query": "SELECT user_id, user_name, email, phone, country, region, signup_date, last_login_date FROM user_profile",
+      "view_required_flag": true,
+      "view_query": "CREATE OR REPLACE VIEW ANALYTICS_DB.SEMANTIC.vw_active_users AS SELECT user_id, user_name, country, region, signup_date, last_login_date FROM ANALYTICS_DB.SEMANTIC.dim_user WHERE last_login_date >= DATEADD(day, -90, CURRENT_DATE())"
+    },
+    {
+      "table_name": "dim_device",
+      "source_model_name": "device_reference",
+      "primary_keys": ["device_code"],
+      "query": "SELECT device_code, device_type, device_category, manufacturer, is_supported FROM device_reference",
+      "view_required_flag": false,
+      "view_query": null
+    },
+    {
+      "table_name": "fact_events",
+      "source_model_name": "event_tracker",
+      "primary_keys": ["event_id"],
+      "query": "SELECT event_id, session_id, user_id, event_type, event_name, event_ts, event_payload, src_system, event_ver, substring_index(event_type, '.', 1) as event_category, substring_index(event_type, '.', -1) as event_version_number FROM event_tracker",
+      "view_required_flag": true,
+      "view_query": "CREATE OR REPLACE VIEW ANALYTICS_DB.SEMANTIC.vw_daily_events AS SELECT event_category, event_version_number, COUNT(*) as event_count, COUNT(DISTINCT user_id) as unique_users, COUNT(DISTINCT session_id) as unique_sessions, MIN(event_ts) as first_event, MAX(event_ts) as last_event FROM ANALYTICS_DB.SEMANTIC.fact_events GROUP BY event_category, event_version_number"
+    },
+    {
+      "table_name": "fact_sessions",
+      "source_model_name": "session_tracker",
+      "primary_keys": ["session_id"],
+      "query": "SELECT session_id, user_id, session_start_ts, session_end_ts, device_type, browser, os_ver, country, region, total_events, join_count, left_count, screenshare_count, first_event_ts, last_event_ts, session_duration_mins, CASE WHEN session_duration_mins <= 5 THEN 'short' WHEN session_duration_mins <= 30 THEN 'medium' WHEN session_duration_mins <= 60 THEN 'long' ELSE 'extended' END as session_category FROM session_tracker",
+      "view_required_flag": true,
+      "view_query": "CREATE OR REPLACE VIEW ANALYTICS_DB.SEMANTIC.vw_session_metrics AS SELECT country, region, device_type, browser, session_category, COUNT(*) as total_sessions, AVG(session_duration_mins) as avg_duration, SUM(total_events) as total_events, SUM(join_count) as total_joins, SUM(screenshare_count) as total_screenshares FROM ANALYTICS_DB.SEMANTIC.fact_sessions GROUP BY country, region, device_type, browser, session_category"
+    },
+    {
+      "table_name": "fact_user_summary",
+      "source_model_name": "user_session_summary",
+      "primary_keys": ["user_id"],
+      "query": "SELECT user_id, user_name, country, region, total_sessions, lifetime_events, lifetime_joins, avg_session_duration, last_activity_date, effective_start_date, effective_end_date, current_flag FROM user_session_summary WHERE current_flag = 'Y'",
+      "view_required_flag": true,
+      "view_query": "CREATE OR REPLACE VIEW ANALYTICS_DB.SEMANTIC.vw_user_engagement_tiers AS SELECT user_id, user_name, country, region, total_sessions, lifetime_events, avg_session_duration, last_activity_date, CASE WHEN total_sessions >= 50 AND lifetime_events >= 500 THEN 'power_user' WHEN total_sessions >= 20 AND lifetime_events >= 100 THEN 'active' WHEN total_sessions >= 5 THEN 'casual' ELSE 'inactive' END as engagement_tier, CASE WHEN last_activity_date >= DATEADD(day, -7, CURRENT_DATE()) THEN 'active' WHEN last_activity_date >= DATEADD(day, -30, CURRENT_DATE()) THEN 'at_risk' ELSE 'churned' END as retention_status FROM ANALYTICS_DB.SEMANTIC.fact_user_summary"
+    }
+  ]
+}
