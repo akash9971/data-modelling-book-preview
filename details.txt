@@ -1,0 +1,86 @@
+import org.apache.spark.sql.{DataFrame, SparkSession}
+import org.apache.spark.sql.functions._
+import org.apache.spark.sql.types._
+
+// ── Flatten schema helper (same as before) ────────────────────────────────────
+def flattenSchema(schema: StructType, prefix: String = ""): List[(String, String)] = {
+  schema.fields.flatMap { field =>
+    val fullName = if (prefix.isEmpty) field.name else s"$prefix.${field.name}"
+    field.dataType match {
+      case st: StructType   => flattenSchema(st, fullName)
+      case at: ArrayType    =>
+        at.elementType match {
+          case st: StructType => flattenSchema(st, s"$fullName[]")
+          case dt             => List((fullName, s"ARRAY<${dt.simpleString}>"))
+        }
+      case dt               => List((fullName, dt.simpleString))
+    }
+  }.toList
+}
+
+// ── Get ALL leaf field paths from schema ──────────────────────────────────────
+def getAllFieldPaths(schema: StructType, prefix: String = ""): List[String] = {
+  schema.fields.flatMap { field =>
+    val fullName = if (prefix.isEmpty) field.name else s"$prefix.${field.name}"
+    field.dataType match {
+      case st: StructType => getAllFieldPaths(st, fullName)
+      case at: ArrayType  =>
+        at.elementType match {
+          case st: StructType => getAllFieldPaths(st, s"$fullName[]")
+          case _              => List(fullName)
+        }
+      case _              => List(fullName)
+    }
+  }.toList
+}
+
+// ── Core fix: extract effective schema per detail_type from DATA ──────────────
+def extractSchemaPerDetailType(df: DataFrame): Map[String, Map[String, String]] = {
+
+  // All leaf paths and their types from full schema
+  val allFieldPaths: List[(String, String)] = flattenSchema(df.schema)
+    .filterNot(_._1 == "detail_type")
+
+  // All distinct detail types
+  val detailTypes = df
+    .select("detail_type")
+    .distinct()
+    .collect()
+    .map(_.getAs[String]("detail_type"))
+    .filterNot(_ == null)
+    .toList
+
+  println(s"Found detail types: $detailTypes")
+  println(s"All fields in schema: ${allFieldPaths.map(_._1)}")
+
+  detailTypes.map { dt =>
+
+    val dtDf = df.filter(col("detail_type") === dt)
+
+    // ── Build non-null count expressions for each field ───────────────────
+    // Use backticks for nested paths like `properties.user_id`
+    val nonNullExprs = allFieldPaths.map { case (path, _) =>
+      val safePath = path.replaceAll("\\[]", "")   // strip array notation for col access
+      sum(when(col(s"`$safePath`").isNotNull, 1L).otherwise(0L))
+        .alias(path.replaceAll("[^a-zA-Z0-9_]", "_"))  // safe alias
+    }
+
+    val nonNullRow = dtDf
+      .agg(nonNullExprs.head, nonNullExprs.tail: _*)
+      .collect()(0)
+
+    // ── Keep only fields that have at least 1 non-null value ─────────────
+    val effectiveSchema = allFieldPaths
+      .filter { case (path, _) =>
+        val safeAlias = path.replaceAll("[^a-zA-Z0-9_]", "_")
+        Try(nonNullRow.getAs[Long](safeAlias)).getOrElse(0L) > 0
+      }
+      .toMap
+
+    println(s"\n[$dt] Effective schema (${effectiveSchema.size} fields):")
+    effectiveSchema.foreach { case (f, t) => println(s"  $f → $t") }
+
+    dt -> effectiveSchema
+
+  }.toMap
+}
