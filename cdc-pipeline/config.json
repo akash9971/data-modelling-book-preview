@@ -1,0 +1,26 @@
+{
+  "cdc_strategy": "hash_based",
+  "tables": [
+    {
+      "model_name": "session_tracker",
+      "lmo_path": "abfss://lmo@datalake.dfs.core.windows.net/tracking/session_tracker",
+      "emo_path": "abfss://emo@datalake.dfs.core.windows.net/tracking/session_tracker",
+      "primary_keys": ["session_id"],
+      "filter": "status != 'TEST'",
+      "mappings": [
+        { "source_name": "session_start_time", "target_name": "session_start_ts", "mask": false },
+        { "source_name": "user_id", "target_name": "user_id", "mask": true }
+      ],
+      "derivations": [
+        { "target_name": "session_duration_mins",
+          "expression": "(unix_timestamp(session_end_ts) - unix_timestamp(session_start_ts))/60" }
+      ]
+    },
+    {
+      "model_name": "device_reference",
+      "lmo_path": "abfss://lmo@datalake.dfs.core.windows.net/reference/device_master",
+      "emo_path": "abfss://emo@datalake.dfs.core.windows.net/reference/device_master",
+      "primary_keys": ["device_code"]
+    }
+  ]
+}
